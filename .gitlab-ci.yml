@@ -1,0 +1,198 @@
+stages:
+  - .pre
+  - test
+  - analyze_scans
+  - .post
+  # - provisioning_infra
+include:
+  - template: Security/Secret-Detection.gitlab-ci.yml
+  - template: Security/SAST.gitlab-ci.yml
+  # - template: Jobs/Container-Scanning.gitlab-ci.yml
+
+sast:
+  stage: test
+  # tags:
+  #   - fusion-docker
+  artifacts:
+    paths:
+      - gl-sast-report.json
+  when: manual
+
+secret_detection:
+  stage: test
+  # tags:
+  #   - fusion-docker
+  when: manual
+  artifacts:
+    paths:
+      - gl-secret-detection-report.json
+  variables:
+    SECRET_DETECTION_HISTORIC_SCAN: "true"
+
+# container_scanning:
+#   stage: test
+#   when: manual
+#   artifacts:
+#     paths:
+#       - gl-container-scanning-report.json
+#       - gl-dependency-scanning-report.json
+#   variables:
+#     CS_DEFAULT_BRANCH_IMAGE: $CI_REGISTRY_IMAGE/$CI_DEFAULT_BRANCH:$CI_COMMIT_SHA
+#     CS_DOCKERFILE_PATH: $CI_PROJECT_DIR/Dockerfile
+#     GIT_STRATEGY: fetch
+#     SECURE_LOG_LEVEL: debug
+
+# analyze_scans:
+#   stage: analyze_scans
+#   image: 
+#     name: haocomcloud/gitleaks
+# #    name: amazon/aws-cli
+#     entrypoint: [""]
+#   # tags:
+#   #   - fusion-docker
+#   when: manual
+#   allow_failure: false
+#   script:
+#     - chmod +x script.sh
+#     - ./script.sh gl-secret-detection-report.json
+#     - ./script.sh gl-sast-report.json
+
+#   after_script:
+#     - cat gl-sast-report.json
+
+
+## DEFECTDOJO integate
+variables:
+  DEFECTDOJO_ENGAGEMENT_PERIOD: 7
+  DEFECTDOJO_ENGAGEMENT_STATUS: "Not Started"
+  DEFECTDOJO_ENGAGEMENT_BUILD_SERVER: "null"
+  DEFECTDOJO_ENGAGEMENT_SOURCE_CODE_MANAGEMENT_SERVER: "null"
+  DEFECTDOJO_ENGAGEMENT_ORCHESTRATION_ENGINE: "null"
+  DEFECTDOJO_ENGAGEMENT_DEDUPLICATION_ON_ENGAGEMENT: "false"
+  DEFECTDOJO_ENGAGEMENT_THREAT_MODEL: "true"
+  DEFECTDOJO_ENGAGEMENT_API_TEST: "true"
+  DEFECTDOJO_ENGAGEMENT_PEN_TEST: "true"
+  DEFECTDOJO_ENGAGEMENT_CHECK_LIST: "true"
+  DEFECTDOJO_NOT_ON_MASTER: "false"
+  DEFECTDOJO_SCAN_MINIMUM_SEVERITY: "Info"
+  DEFECTDOJO_SCAN_ACTIVE: "true"
+  DEFECTDOJO_SCAN_VERIFIED: "true"
+  DEFECTDOJO_SCAN_CLOSE_OLD_FINDINGS: "true"
+  DEFECTDOJO_SCAN_PUSH_TO_JIRA: "false"
+  DEFECTDOJO_SCAN_ENVIRONMENT: "Default"
+
+defectdojo_create_engagement:
+  stage: .pre
+  image: alpine
+  variables:
+    GIT_STRATEGY: none
+  allow_failure: true
+  rules:
+    - if: '$DEFECTDOJO_NOT_ON_MASTER == "true" && $CI_COMMIT_BRANCH == "master"'
+      when: never
+    - when: always
+  before_script:
+    - apk add curl jq coreutils
+    - TODAY=`date +%Y-%m-%d`
+    - ENDDAY=$(date -d "+${DEFECTDOJO_ENGAGEMENT_PERIOD} days" +%Y-%m-%d)
+    
+  script:
+    - |
+        ENGAGEMENTID=`curl --fail --location --request POST "${DEFECTDOJO_URL}/engagements/" \
+              --header "Authorization: Token ${DEFECTDOJO_TOKEN}" \
+              --header 'Content-Type: application/json' \
+                --data-raw "{
+                  \"tags\": [\"GITLAB-CI\"],
+                  \"name\": \"#${CI_PIPELINE_ID}\",
+                  \"description\": \"${CI_COMMIT_DESCRIPTION}\",
+                  \"version\": \"${CI_COMMIT_REF_NAME}\",
+                  \"first_contacted\": \"${TODAY}\",
+                  \"target_start\": \"${TODAY}\",
+                  \"target_end\": \"${ENDDAY}\",
+                  \"reason\": \"string\",
+                  \"tracker\": \"${CI_PROJECT_URL}/-/issues\",
+                  \"threat_model\": \"${DEFECTDOJO_ENGAGEMENT_THREAT_MODEL}\",
+                  \"api_test\": \"${DEFECTDOJO_ENGAGEMENT_API_TEST}\",
+                  \"pen_test\": \"${DEFECTDOJO_ENGAGEMENT_PEN_TEST}\",
+                  \"check_list\": \"${DEFECTDOJO_ENGAGEMENT_CHECK_LIST}\",
+                  \"status\": \"${DEFECTDOJO_ENGAGEMENT_STATUS}\",
+                  \"engagement_type\": \"CI/CD\",
+                  \"build_id\": \"${CI_PIPELINE_ID}\",
+                  \"commit_hash\": \"${CI_COMMIT_SHORT_SHA}\",
+                  \"branch_tag\": \"${CI_COMMIT_REF_NAME}\",
+                  \"deduplication_on_engagement\": \"${DEFECTDOJO_ENGAGEMENT_DEDUPLICATION_ON_ENGAGEMENT}\",
+                  \"product\": \"${DEFECTDOJO_PRODUCTID}\",
+                  \"source_code_management_uri\": \"${CI_PROJECT_URL}\",
+                  \"build_server\": ${DEFECTDOJO_ENGAGEMENT_BUILD_SERVER},
+                  \"source_code_management_server\": ${DEFECTDOJO_ENGAGEMENT_SOURCE_CODE_MANAGEMENT_SERVER},
+                  \"orchestration_engine\": ${DEFECTDOJO_ENGAGEMENT_ORCHESTRATION_ENGINE}
+                }" | jq -r '.id'`
+    - echo "DEFECTDOJO_ENGAGEMENTID=${ENGAGEMENTID}" >> defectdojo.env
+  artifacts:
+    reports:
+      dotenv: defectdojo.env
+
+
+defectdojo_publish:
+  stage: .post
+  image: alpine
+  before_script:
+    - apk add curl coreutils
+    - TODAY=`date +%Y-%m-%d`
+  allow_failure: true
+  script:
+    - |
+        curl -X 'POST' \
+            "${DEFECTDOJO_URL}/import-scan/" \
+            -H 'accept: application/json' \
+            -H 'Content-Type: multipart/form-data' \
+            -H "Authorization: Token ${DEFECTDOJO_TOKEN}" \
+            -F "scan_date=${TODAY}" \
+            -F "active=${DEFECTDOJO_SCAN_ACTIVE}" \
+            -F "verified=${DEFECTDOJO_SCAN_VERIFIED}" \
+            -F "close_old_findings=${DEFECTDOJO_SCAN_CLOSE_OLD_FINDINGS}" \
+            -F 'minimum_severity=Info' \
+            -F 'create_finding_groups_for_all_findings=true' \
+            -F 'tags=secretdetection' \
+            -F "file=@$CI_PROJECT_DIR/gl-secret-detection-report.json;type=application/json" \
+            -F "scan_type=GitLab Secret Detection Report" \
+            -F "engagement=${DEFECTDOJO_ENGAGEMENTID}"
+
+
+
+
+
+
+# provisioning_infra:
+#   image: python:3.10
+#   stage: provisioning_infra
+#   tags:
+#     - fusion-docker
+#   before_script:
+#     # Set environment variables for AWS credentials and region
+#     - export AWS_ACCESS_KEY_ID=$AWS_ACCESS_KEY_ID
+#     - export AWS_SECRET_ACCESS_KEY=$AWS_SECRET_ACCESS_KEY
+#     - export AWS_DEFAULT_REGION=$AWS_DEFAULT_REGION
+#     - export envType=$env
+#     - export TF_VAR_CLOUD_REGION=$AWS_DEFAULT_REGION
+#   script:
+#     # Change to the 'config' directory
+#     - cd config
+#     # Download and install Terraform
+#     - wget https://releases.hashicorp.com/terraform/1.3.7/terraform_1.3.7_linux_amd64.zip
+#     - unzip terraform_1.3.7_linux_amd64.zip
+#     - mv terraform /usr/local/bin
+#     # Display Terraform version
+#     - terraform --version
+#     # Initialize Terraform with backend configuration
+#     - terraform init -backend-config="bucket=$BUCKET_NAME" -backend-config="key=terraform/${PROJECT_NAME}/${envType}/terraform.tfstate" -backend-config="region=$TF_VAR_CLOUD_REGION"
+#     # Create an execution plan and save it to a file
+#     - terraform plan -out "planfile"
+#     # Apply the Terraform changes using the saved execution plan
+#     - terraform apply -input=false "planfile"
+#   environment:
+#     # Set the environment name to the GitLab CI/CD branch or tag name
+#     name: $CI_COMMIT_REF_NAME
+#   when: manual # This stage should be triggered manually
+#   dependencies:
+#     - analyze_scans
